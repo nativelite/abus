@@ -288,7 +288,10 @@ pub fn event_to_value(e: &Event) -> Value {
     Value::Object(vec![
         ("seq".to_string(), Value::Number(Number::Int(e.seq as i64))),
         ("topic".to_string(), Value::String(e.topic.clone())),
-        ("kind".to_string(), Value::String(e.kind.as_str().to_string())),
+        (
+            "kind".to_string(),
+            Value::String(e.kind.as_str().to_string()),
+        ),
         (
             "from".to_string(),
             e.from.clone().map(Value::String).unwrap_or(Value::Null),
@@ -316,7 +319,10 @@ fn snapshot(bus: &Bus) -> String {
         })
         .collect();
     Value::Object(vec![
-        ("next_seq".to_string(), Value::Number(Number::Int(bus.next_seq as i64))),
+        (
+            "next_seq".to_string(),
+            Value::Number(Number::Int(bus.next_seq as i64)),
+        ),
         ("events".to_string(), Value::Array(events)),
         ("subs".to_string(), Value::Object(subs)),
     ])
@@ -338,14 +344,22 @@ fn parse_snapshot(text: &str) -> Option<Bus> {
     // next_seq is the last-used seq (1-based, pre-incremented on publish). Honor
     // the stored cursor, but never below max(seq) so ids stay unique even if the
     // snapshot was hand-edited.
-    let stored = v.get("next_seq").and_then(Value::as_i64).unwrap_or(0).max(0) as u64;
+    let stored = v
+        .get("next_seq")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0) as u64;
     let from_events = bus.events.iter().map(|e| e.seq).max().unwrap_or(0);
     bus.next_seq = stored.max(from_events);
     if let Some(subs) = v.get("subs").and_then(Value::as_object) {
         for (who, topics) in subs {
             let set: BTreeSet<String> = topics
                 .as_array()
-                .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             if !set.is_empty() {
                 bus.subs.insert(who.clone(), set);
@@ -395,14 +409,33 @@ mod tests {
     use super::*;
 
     fn f(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn publish_assigns_monotonic_seq_and_returns_event() {
         let mut b = Bus::new();
-        let e0 = b.publish("deploy", Kind::Fyi, Some("dev_1"), &f(&[("msg", "merged")]), 100).unwrap();
-        let e1 = b.publish("deploy", Kind::Fyi, Some("dev_2"), &f(&[("msg", "built")]), 101).unwrap();
+        let e0 = b
+            .publish(
+                "deploy",
+                Kind::Fyi,
+                Some("dev_1"),
+                &f(&[("msg", "merged")]),
+                100,
+            )
+            .unwrap();
+        let e1 = b
+            .publish(
+                "deploy",
+                Kind::Fyi,
+                Some("dev_2"),
+                &f(&[("msg", "built")]),
+                101,
+            )
+            .unwrap();
         assert_eq!(e0.seq, 1);
         assert_eq!(e1.seq, 2);
         assert_eq!(e0.fields.get("msg").map(String::as_str), Some("merged"));
@@ -413,8 +446,10 @@ mod tests {
         let mut b = Bus::new();
         b.subscribe("lead", &["deploy".to_string()]);
         b.subscribe("dev_1", &["deploy".to_string()]);
-        b.publish("deploy", Kind::Fyi, Some("dev_1"), &f(&[("m", "x")]), 1).unwrap();
-        b.publish("billing", Kind::Fyi, Some("dev_2"), &f(&[("m", "y")]), 2).unwrap();
+        b.publish("deploy", Kind::Fyi, Some("dev_1"), &f(&[("m", "x")]), 1)
+            .unwrap();
+        b.publish("billing", Kind::Fyi, Some("dev_2"), &f(&[("m", "y")]), 2)
+            .unwrap();
         // lead subscribes to deploy → sees dev_1's deploy event, not billing.
         let lead = b.feed("lead", 0);
         assert_eq!(lead.len(), 1);
@@ -447,7 +482,10 @@ mod tests {
     fn no_subscription_means_no_feed() {
         let mut b = Bus::new();
         b.publish("a", Kind::Fyi, Some("x"), &f(&[]), 1).unwrap();
-        assert!(b.feed("nobody", 0).is_empty(), "pull-not-push: unsubscribed sees nothing");
+        assert!(
+            b.feed("nobody", 0).is_empty(),
+            "pull-not-push: unsubscribed sees nothing"
+        );
     }
 
     #[test]
@@ -455,15 +493,28 @@ mod tests {
         let mut b = Bus::new();
         // Fill the window right up to the cap.
         for i in 0..RATE_MAX {
-            b.publish("t", Kind::Fyi, Some("loud"), &f(&[]), 1000 + i as u64).unwrap();
+            b.publish("t", Kind::Fyi, Some("loud"), &f(&[]), 1000 + i as u64)
+                .unwrap();
         }
         // One more inside the window is rejected…
-        let over = b.publish("t", Kind::Fyi, Some("loud"), &f(&[]), 1000 + RATE_MAX as u64);
+        let over = b.publish(
+            "t",
+            Kind::Fyi,
+            Some("loud"),
+            &f(&[]),
+            1000 + RATE_MAX as u64,
+        );
         assert!(over.is_err(), "over-cap publish is rejected");
         // …and a rejected publish does not consume a slot or a seq.
         assert_eq!(b.tail(RATE_MAX + 1).len(), RATE_MAX);
         // Past the window, it publishes again.
-        let ok = b.publish("t", Kind::Fyi, Some("loud"), &f(&[]), 1000 + RATE_WINDOW_MS + 1);
+        let ok = b.publish(
+            "t",
+            Kind::Fyi,
+            Some("loud"),
+            &f(&[]),
+            1000 + RATE_WINDOW_MS + 1,
+        );
         assert!(ok.is_ok(), "after the window the agent recovers");
     }
 
@@ -471,7 +522,8 @@ mod tests {
     fn operator_without_from_is_uncapped() {
         let mut b = Bus::new();
         for i in 0..(RATE_MAX + 5) {
-            b.publish("t", Kind::Fyi, None, &f(&[]), 1000 + i as u64).unwrap();
+            b.publish("t", Kind::Fyi, None, &f(&[]), 1000 + i as u64)
+                .unwrap();
         }
         // No rejection for the un-attributed operator.
         assert_eq!(b.tail(RATE_MAX + 5).len(), RATE_MAX + 5);
@@ -482,7 +534,8 @@ mod tests {
         let mut b = Bus::new();
         for i in 0..(RING_CAP + 10) {
             // Uncapped operator publishes so the ring, not the rate cap, is under test.
-            b.publish("t", Kind::Fyi, None, &f(&[("n", &i.to_string())]), i as u64).unwrap();
+            b.publish("t", Kind::Fyi, None, &f(&[("n", &i.to_string())]), i as u64)
+                .unwrap();
         }
         assert_eq!(b.tail(RING_CAP + 100).len(), RING_CAP, "ring is capped");
         // The oldest fell off: with 1-based seqs 1..=RING_CAP+10, keeping the last
@@ -495,7 +548,15 @@ mod tests {
     fn pending_decisions_tracks_open_escalations() {
         let mut b = Bus::new();
         b.publish("t", Kind::Fyi, Some("a"), &f(&[]), 1).unwrap();
-        let d = b.publish("t", Kind::DecisionNeeded, Some("a"), &f(&[("q", "ship?")]), 2).unwrap();
+        let d = b
+            .publish(
+                "t",
+                Kind::DecisionNeeded,
+                Some("a"),
+                &f(&[("q", "ship?")]),
+                2,
+            )
+            .unwrap();
         assert_eq!(b.pending_decisions().len(), 1, "one open decision");
         assert!(b.resolve(d.seq), "resolve an open decision");
         assert!(b.pending_decisions().is_empty(), "resolved decision clears");
@@ -518,12 +579,29 @@ mod tests {
     fn snapshot_round_trips_events_subs_and_cursor() {
         let mut b = Bus::new();
         b.subscribe("lead", &[TOPIC_ALL.to_string()]);
-        b.publish("deploy", Kind::Fyi, Some("dev_1"), &f(&[("m", "merged")]), 10).unwrap();
-        b.publish("deploy", Kind::DecisionNeeded, Some("dev_1"), &f(&[("q", "ship?")]), 11).unwrap();
+        b.publish(
+            "deploy",
+            Kind::Fyi,
+            Some("dev_1"),
+            &f(&[("m", "merged")]),
+            10,
+        )
+        .unwrap();
+        b.publish(
+            "deploy",
+            Kind::DecisionNeeded,
+            Some("dev_1"),
+            &f(&[("q", "ship?")]),
+            11,
+        )
+        .unwrap();
         let snap = snapshot(&b);
         let restored = parse_snapshot(&snap).unwrap();
         assert_eq!(restored.tail(10).len(), 2);
-        assert_eq!(restored.next_seq, 2, "cursor survives so new ids don't collide");
+        assert_eq!(
+            restored.next_seq, 2,
+            "cursor survives so new ids don't collide"
+        );
         assert_eq!(restored.pending_decisions().len(), 1);
         // Subscriptions survive, so the feed still resolves.
         let lead = restored.feed("lead", 0);

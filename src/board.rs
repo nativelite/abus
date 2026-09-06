@@ -221,10 +221,16 @@ pub fn entry_to_value(e: &Entry) -> Value {
                 .map(Value::String)
                 .unwrap_or(Value::Null),
         ),
-        ("ms".to_string(), Value::Number(Number::Int(e.updated_ms as i64))),
+        (
+            "ms".to_string(),
+            Value::Number(Number::Int(e.updated_ms as i64)),
+        ),
         (
             "claimed_by".to_string(),
-            e.claimed_by.clone().map(Value::String).unwrap_or(Value::Null),
+            e.claimed_by
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
         ),
         (
             "lease_ms".to_string(),
@@ -268,8 +274,15 @@ fn parse_snapshot(s: &str) -> Option<BTreeMap<String, Entry>> {
         let updated_by = ev.get("by").and_then(Value::as_str).map(str::to_string);
         let updated_ms = ev.get("ms").and_then(Value::as_i64).unwrap_or(0).max(0) as u64;
         // Claim fields are absent in pre-lease snapshots; default to unclaimed.
-        let claimed_by = ev.get("claimed_by").and_then(Value::as_str).map(str::to_string);
-        let lease_ms = ev.get("lease_ms").and_then(Value::as_i64).unwrap_or(0).max(0) as u64;
+        let claimed_by = ev
+            .get("claimed_by")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let lease_ms = ev
+            .get("lease_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0) as u64;
         let mut fields = BTreeMap::new();
         if let Some(fo) = ev.get("fields").and_then(Value::as_object) {
             for (f, fv) in fo {
@@ -305,15 +318,28 @@ mod tests {
     use super::*;
 
     fn f(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn set_creates_then_merges_fields() {
         let mut b = Board::new();
-        b.set("auth", &f(&[("status", "WIP"), ("owner", "Max")]), Some("cto"), 100);
+        b.set(
+            "auth",
+            &f(&[("status", "WIP"), ("owner", "Max")]),
+            Some("cto"),
+            100,
+        );
         // A second set merges: status updated, owner kept, url added.
-        let e = b.set("auth", &f(&[("status", "DONE"), ("url", "http://x")]), Some("Max"), 200);
+        let e = b.set(
+            "auth",
+            &f(&[("status", "DONE"), ("url", "http://x")]),
+            Some("Max"),
+            200,
+        );
         assert_eq!(e.fields.get("status").map(String::as_str), Some("DONE"));
         assert_eq!(e.fields.get("owner").map(String::as_str), Some("Max"));
         assert_eq!(e.fields.get("url").map(String::as_str), Some("http://x"));
@@ -326,7 +352,10 @@ mod tests {
         let mut b = Board::new();
         b.set("t", &f(&[("blocker", "waiting on api")]), None, 1);
         let e = b.set("t", &f(&[("blocker", "")]), None, 2);
-        assert!(!e.fields.contains_key("blocker"), "empty value clears the field");
+        assert!(
+            !e.fields.contains_key("blocker"),
+            "empty value clears the field"
+        );
     }
 
     #[test]
@@ -371,7 +400,7 @@ mod tests {
     fn claim_is_reclaimable_after_the_lease_lapses() {
         let mut b = Board::new();
         b.claim("t", "scout", 1000, 100); // lease until 1100
-        // At now=1100 the lease has lapsed (>=), so a new agent may take it.
+                                          // At now=1100 the lease has lapsed (>=), so a new agent may take it.
         match b.claim("t", "maker", 1000, 1100) {
             Claim::Granted(e) => assert_eq!(e.claimed_by.as_deref(), Some("maker")),
             other => panic!("expired lease should be reclaimable, got {other:?}"),
@@ -392,13 +421,17 @@ mod tests {
     fn owners_set_renews_the_lease_but_a_strangers_does_not() {
         let mut b = Board::new();
         b.claim("t", "scout", 1000, 100); // lease until 1100
-        // The owner updating status renews to now + DEFAULT_LEASE_MS.
+                                          // The owner updating status renews to now + DEFAULT_LEASE_MS.
         let e = b.set("t", &f(&[("status", "WIP")]), Some("scout"), 200);
         assert_eq!(e.lease_ms, 200 + DEFAULT_LEASE_MS);
         // A stranger annotating the task updates fields but leaves the claim intact.
         let e = b.set("t", &f(&[("note", "looks good")]), Some("lead"), 300);
         assert_eq!(e.claimed_by.as_deref(), Some("scout"));
-        assert_eq!(e.lease_ms, 200 + DEFAULT_LEASE_MS, "stranger's set must not renew");
+        assert_eq!(
+            e.lease_ms,
+            200 + DEFAULT_LEASE_MS,
+            "stranger's set must not renew"
+        );
         assert_eq!(e.fields.get("note").map(String::as_str), Some("looks good"));
     }
 
@@ -411,10 +444,20 @@ mod tests {
         let e = b.get("t").unwrap();
         assert!(e.claimed_by.is_none(), "release clears the holder");
         assert_eq!(e.lease_ms, 0, "release clears the lease");
-        assert_eq!(e.fields.get("status").map(String::as_str), Some("WIP"), "fields survive");
+        assert_eq!(
+            e.fields.get("status").map(String::as_str),
+            Some("WIP"),
+            "fields survive"
+        );
         // Now anyone can claim it.
-        assert!(matches!(b.claim("t", "maker", 1000, 300), Claim::Granted(_)));
-        assert!(!b.release("missing", 1), "release of an absent key is false");
+        assert!(matches!(
+            b.claim("t", "maker", 1000, 300),
+            Claim::Granted(_)
+        ));
+        assert!(
+            !b.release("missing", 1),
+            "release of an absent key is false"
+        );
     }
 
     #[test]
@@ -422,7 +465,10 @@ mod tests {
         let mut b = Board::new();
         b.claim("t", "scout", 1000, 100);
         let snap = snapshot(
-            &b.list().into_iter().map(|(k, e)| (k.clone(), e.clone())).collect(),
+            &b.list()
+                .into_iter()
+                .map(|(k, e)| (k.clone(), e.clone()))
+                .collect(),
         );
         let parsed = parse_snapshot(&snap).unwrap();
         let e = &parsed["t"];
@@ -444,7 +490,12 @@ mod tests {
     #[test]
     fn snapshot_round_trips() {
         let mut b = Board::new();
-        b.set("auth", &f(&[("status", "DONE"), ("owner", "Max")]), Some("cto"), 42);
+        b.set(
+            "auth",
+            &f(&[("status", "DONE"), ("owner", "Max")]),
+            Some("cto"),
+            42,
+        );
         b.set("bill", &f(&[("status", "BLOCKED")]), Some("Vic"), 7);
         let snap = snapshot(
             &b.list()
