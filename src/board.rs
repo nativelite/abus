@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 /// Environment knob naming a snapshot file to persist the board to. Unset ⇒ the
 /// board is in-memory only (lost on exit). Opt-in, on top of `--allow-ctl`.
-pub const ENV_BOARD: &str = "AMUX_BOARD";
+pub const ENV_BOARD: &str = "ATRIUM_BOARD";
 
 /// Default lease length for a [`Board::claim`] (and the renewal an owner's
 /// [`Board::set`] grants): 5 minutes. Deliberately generous: a lease shorter

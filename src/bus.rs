@@ -24,7 +24,7 @@
 //! * *Bounded ring*: at most [`RING_CAP`] events are retained; the oldest fall
 //!   off. The log can never grow without bound.
 //!
-//! Optionally mirrored to a snapshot file (set `AMUX_BUS=<path>`) so the feed and
+//! Optionally mirrored to a snapshot file (set `ATRIUM_BUS=<path>`) so the feed and
 //! subscriptions survive a restart. Pure logic + a best-effort atomic write;
 //! unit-tested without a terminal.
 //!
@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 
 /// Environment knob naming a snapshot file to persist the bus to. Unset ⇒ the
 /// bus is in-memory only (lost on exit). Opt-in, on top of `--allow-ctl`.
-pub const ENV_BUS: &str = "AMUX_BUS";
+pub const ENV_BUS: &str = "ATRIUM_BUS";
 
 /// The topic that subscribes to *everything*: the lead/operator firehose.
 pub const TOPIC_ALL: &str = "*";

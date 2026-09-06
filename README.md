@@ -9,7 +9,7 @@ A single host process (a broker) owns each instance and every participant talks
 to it over one channel, so the state is a plain map / ring behind that channel:
 **single writer, no locking, no consensus.** abus is transport-agnostic: it holds
 the state and the rules; the host wires it to its own IPC and renders it. It was
-extracted from [atrium](https://github.com/nativelite/amux), the multi-agent
+extracted from [atrium](https://github.com/nativelite/atrium), the multi-agent
 terminal that first grew this layer.
 
 ## The two halves
@@ -23,7 +23,7 @@ terminal that first grew this layer.
 ### Board
 
 A schemaless `key → fields` tracker. `set` merges fields into an entry (an empty
-value clears a field); every write records who made it and when; `AMUX_BOARD`-style
+value clears a field); every write records who made it and when; `ATRIUM_BOARD`-style
 snapshot persistence is opt-in via [`board::ENV_BOARD`].
 
 ```rust
