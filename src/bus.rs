@@ -8,7 +8,7 @@
 //! to a **topic**, and other teammates **pull** the events on the topics they
 //! subscribe to. Two urgency classes: [`Kind::Fyi`] (cheap, informational, lands
 //! on the feed) and [`Kind::DecisionNeeded`] (an escalation: something needs a
-//! lead/human decision, surfaced actively). Like the board it lives in the amux
+//! lead/human decision, surfaced actively). Like the board it lives in the atrium
 //! daemon (single broker process ⇒ a plain in-memory log behind the pipe, no
 //! locking, no consensus).
 //!

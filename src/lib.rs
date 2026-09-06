@@ -19,7 +19,7 @@
 //! wires these to its own IPC and renders them; abus stays transport-agnostic and
 //! unit-testable without a terminal.
 //!
-//! Extracted from amux (the multi-agent terminal that first grew this layer) so
+//! Extracted from atrium (the multi-agent terminal that first grew this layer) so
 //! the coordination concern is one package, reusable by any agent host.
 
 pub mod board;
