@@ -1,27 +1,27 @@
-//! The shared **bus**: topic-routed pub/sub for a coordinating team — the
+//! The shared **bus**: topic-routed pub/sub for a coordinating team, the
 //! "what just happened, and does anyone need to act?" half of the coordination
 //! layer, the active complement to the [`crate::board`]'s durable "what is
 //! currently true".
 //!
-//! A team of agent panes that only shares a board must *poll* it — state without
+//! A team of agent panes that only shares a board must *poll* it: state without
 //! notification. The bus fixes that: a teammate **publishes a structured event**
 //! to a **topic**, and other teammates **pull** the events on the topics they
 //! subscribe to. Two urgency classes: [`Kind::Fyi`] (cheap, informational, lands
-//! on the feed) and [`Kind::DecisionNeeded`] (an escalation — something needs a
+//! on the feed) and [`Kind::DecisionNeeded`] (an escalation: something needs a
 //! lead/human decision, surfaced actively). Like the board it lives in the amux
 //! daemon (single broker process ⇒ a plain in-memory log behind the pipe, no
 //! locking, no consensus).
 //!
 //! **Backpressure is built in from message one**, because unread messages cost
 //! attention:
-//! * *No echo* — you never receive your own events back ([`Bus::feed`] filters on
+//! * *No echo*: you never receive your own events back ([`Bus::feed`] filters on
 //!   `from`).
-//! * *Pull, not push* — [`Bus::feed`] returns only events on topics the caller
+//! * *Pull, not push*: [`Bus::feed`] returns only events on topics the caller
 //!   subscribed to (via [`Bus::subscribe`]); an agent pays only for topics it owns.
-//! * *Per-agent rate cap* — [`Bus::publish`] rejects an agent that floods
+//! * *Per-agent rate cap*: [`Bus::publish`] rejects an agent that floods
 //!   ([`RATE_MAX`] events per [`RATE_WINDOW_MS`]), so one looping worker can't
 //!   storm the team.
-//! * *Bounded ring* — at most [`RING_CAP`] events are retained; the oldest fall
+//! * *Bounded ring*: at most [`RING_CAP`] events are retained; the oldest fall
 //!   off. The log can never grow without bound.
 //!
 //! Optionally mirrored to a snapshot file (set `AMUX_BUS=<path>`) so the feed and
@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 /// bus is in-memory only (lost on exit). Opt-in, on top of `--allow-ctl`.
 pub const ENV_BUS: &str = "AMUX_BUS";
 
-/// The topic that subscribes to *everything* — the lead/operator firehose.
+/// The topic that subscribes to *everything*: the lead/operator firehose.
 pub const TOPIC_ALL: &str = "*";
 
 /// How many events the ring retains before the oldest fall off (backpressure:
@@ -47,17 +47,17 @@ pub const TOPIC_ALL: &str = "*";
 pub const RING_CAP: usize = 512;
 
 /// Per-agent publish rate cap: at most this many events per [`RATE_WINDOW_MS`].
-/// A worker that exceeds it is told to slow down — one looping agent can't storm
+/// A worker that exceeds it is told to slow down; one looping agent can't storm
 /// the team. Generous enough that normal coordination never trips it.
 pub const RATE_MAX: usize = 20;
 /// The sliding window (ms) the rate cap counts publishes over.
 pub const RATE_WINDOW_MS: u64 = 10_000;
 
-/// The urgency class of an event — the visibility-vs-approval split.
+/// The urgency class of an event: the visibility-vs-approval split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// Cheap, informational. Lands on the feed; a teammate reads it when they
-    /// pull their topics. The default — most coordination is FYI.
+    /// pull their topics. The default: most coordination is FYI.
     Fyi,
     /// An escalation: something needs a lead/human decision. Surfaced actively
     /// (counted for the bar/panel) and stays "open" until [`Bus::resolve`]d.
@@ -74,7 +74,7 @@ impl Kind {
     }
 
     /// Parse a kind keyword (with a couple of intuitive aliases). `None` for
-    /// anything else — the caller reports a clear error.
+    /// anything else; the caller reports a clear error.
     pub fn from_keyword(k: &str) -> Option<Kind> {
         match k {
             "fyi" | "info" | "note" => Some(Kind::Fyi),
@@ -101,7 +101,7 @@ pub struct Event {
     pub resolved: bool,
 }
 
-/// The shared bus — a bounded event ring plus per-subscriber topic interests.
+/// The shared bus: a bounded event ring plus per-subscriber topic interests.
 #[derive(Debug, Default)]
 pub struct Bus {
     events: VecDeque<Event>,
@@ -120,7 +120,7 @@ impl Bus {
     }
 
     /// A bus backed by a snapshot file, loading any existing state. A missing,
-    /// empty, or corrupt file simply starts empty — persistence is best-effort
+    /// empty, or corrupt file simply starts empty; persistence is best-effort
     /// and never fatal.
     pub fn with_file(path: PathBuf) -> Self {
         let mut bus = std::fs::read_to_string(&path)
@@ -190,7 +190,7 @@ impl Bus {
     }
 
     /// Record `who`'s interest in `topics` (merged with any existing). Subscribe
-    /// to [`TOPIC_ALL`] (`*`) to pull every topic — the lead/operator firehose.
+    /// to [`TOPIC_ALL`] (`*`) to pull every topic: the lead/operator firehose.
     /// Persists if backed by a file.
     pub fn subscribe(&mut self, who: &str, topics: &[String]) {
         let set = self.subs.entry(who.to_string()).or_default();
@@ -239,7 +239,7 @@ impl Bus {
             .collect()
     }
 
-    /// Every unresolved [`Kind::DecisionNeeded`] event, oldest-first — the open
+    /// Every unresolved [`Kind::DecisionNeeded`] event, oldest-first: the open
     /// escalations the lead/human still owes an answer. Drives the bar/panel
     /// "N decisions" attention marker; unlike [`feed`](Bus::feed) it is global
     /// (the broker sees all open decisions, not a per-topic slice).
@@ -263,7 +263,7 @@ impl Bus {
         false
     }
 
-    /// The most recent `n` events (any topic), oldest-first — the unfiltered tail
+    /// The most recent `n` events (any topic), oldest-first: the unfiltered tail
     /// for the panel/`feed --all` view.
     pub fn tail(&self, n: usize) -> Vec<&Event> {
         let start = self.events.len().saturating_sub(n);

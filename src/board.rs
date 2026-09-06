@@ -2,7 +2,7 @@
 //!
 //! A schemaless `key → fields` tracker owned by the host's broker process.
 //! Because a single broker owns the instance and every participant talks to it
-//! over one channel, the board is a plain map behind that channel — **single
+//! over one channel, the board is a plain map behind that channel: **single
 //! process, single writer, so no locking and no consensus.** This is the "what is
 //! currently true" half of the coordination layer (`auth: DONE, owner: Max, url:
 //! …`), the durable complement to an ephemeral message stream: a lead reads
@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 pub const ENV_BOARD: &str = "AMUX_BOARD";
 
 /// Default lease length for a [`Board::claim`] (and the renewal an owner's
-/// [`Board::set`] grants): 5 minutes. Deliberately generous — a lease shorter
+/// [`Board::set`] grants): 5 minutes. Deliberately generous: a lease shorter
 /// than a real unit of work would expire mid-task and let a second agent
 /// double-claim, recreating the very collision claiming exists to prevent. An
 /// actively-working owner renews on every `set`, so only a stalled/dead owner
@@ -39,10 +39,10 @@ pub const DEFAULT_LEASE_MS: u64 = 5 * 60 * 1000;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entry {
     pub fields: BTreeMap<String, String>,
-    /// The role (or pane) that last wrote this entry — accountability, not auth.
+    /// The role (or pane) that last wrote this entry: accountability, not auth.
     pub updated_by: Option<String>,
     pub updated_ms: u64,
-    /// The role (or pane) that currently **holds** this task, if any — set by
+    /// The role (or pane) that currently **holds** this task, if any: set by
     /// [`Board::claim`], renewed by that owner's [`Board::set`], cleared by
     /// [`Board::release`]. Accountability + collision-avoidance, not auth.
     pub claimed_by: Option<String>,
@@ -55,7 +55,7 @@ pub struct Entry {
 impl Entry {
     /// Is this entry actively held *by someone other than* `who` at `now_ms`? A
     /// lapsed lease (`now >= lease_ms`) or a claim held by `who` itself is not a
-    /// block — both let `who` (re)claim.
+    /// block; both let `who` (re)claim.
     fn held_against(&self, who: &str, now_ms: u64) -> bool {
         match &self.claimed_by {
             Some(owner) => owner != who && now_ms < self.lease_ms,
@@ -70,11 +70,11 @@ impl Entry {
 pub enum Claim {
     /// The caller holds the task; the entry carries the fresh `claimed_by`/lease.
     Granted(Entry),
-    /// Someone else holds it — `holder` until `lease_ms` (epoch-ms). No write made.
+    /// Someone else holds it: `holder` until `lease_ms` (epoch-ms). No write made.
     Denied { holder: String, lease_ms: u64 },
 }
 
-/// The shared board — keyed entries with an optional snapshot file.
+/// The shared board: keyed entries with an optional snapshot file.
 #[derive(Debug, Default)]
 pub struct Board {
     entries: BTreeMap<String, Entry>,
@@ -88,7 +88,7 @@ impl Board {
     }
 
     /// A board backed by a snapshot file, loading any existing state. A missing,
-    /// empty, or corrupt file simply starts empty — persistence is best-effort and
+    /// empty, or corrupt file simply starts empty; persistence is best-effort and
     /// never fatal.
     pub fn with_file(path: PathBuf) -> Self {
         let entries = std::fs::read_to_string(&path)
@@ -119,7 +119,7 @@ impl Board {
                 e.fields.insert(f.clone(), v.clone());
             }
         }
-        // Any update *by the current claim holder* renews the lease — an
+        // Any update *by the current claim holder* renews the lease: an
         // actively-working owner's status writes are its heartbeat, so it never
         // loses its claim, while a stalled owner's lease still lapses. A set by
         // anyone else touches fields only and leaves the claim alone (the board
@@ -139,12 +139,12 @@ impl Board {
 
     /// Atomically **claim** `key` for `owner` with a `ttl_ms` lease. Because the
     /// broker is single-writer this check-then-write has no race: the first
-    /// caller wins and every later caller is told the holder — the primitive that
+    /// caller wins and every later caller is told the holder: the primitive that
     /// turns "everyone grabs the same task, then everyone flees it" into "first
     /// grabs, the rest fan out to what's left."
     ///
     /// Grants when the task is free, its lease has lapsed, or `owner` already
-    /// holds it (idempotent renew). Denies — writing nothing — when someone else
+    /// holds it (idempotent renew). Denies, writing nothing, when someone else
     /// holds an unexpired lease.
     pub fn claim(&mut self, key: &str, owner: &str, ttl_ms: u64, now_ms: u64) -> Claim {
         let e = self.entries.entry(key.to_string()).or_default();
@@ -267,7 +267,7 @@ fn parse_snapshot(s: &str) -> Option<BTreeMap<String, Entry>> {
     for (k, ev) in obj {
         let updated_by = ev.get("by").and_then(Value::as_str).map(str::to_string);
         let updated_ms = ev.get("ms").and_then(Value::as_i64).unwrap_or(0).max(0) as u64;
-        // Claim fields are absent in pre-lease snapshots — default to unclaimed.
+        // Claim fields are absent in pre-lease snapshots; default to unclaimed.
         let claimed_by = ev.get("claimed_by").and_then(Value::as_str).map(str::to_string);
         let lease_ms = ev.get("lease_ms").and_then(Value::as_i64).unwrap_or(0).max(0) as u64;
         let mut fields = BTreeMap::new();

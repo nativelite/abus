@@ -1,12 +1,12 @@
 # abus
 
-**The coordination layer for a team of agents** — a shared **board** and a
+**The coordination layer for a team of agents**: a shared **board** and a
 topic-routed pub/sub **bus**, as pure, snapshot-persistable logic. Part of
 [nativelite](https://github.com/nativelite): standard library plus the org `json`
 crate, **zero third-party dependencies**.
 
 A single host process (a broker) owns each instance and every participant talks
-to it over one channel, so the state is a plain map / ring behind that channel —
+to it over one channel, so the state is a plain map / ring behind that channel:
 **single writer, no locking, no consensus.** abus is transport-agnostic: it holds
 the state and the rules; the host wires it to its own IPC and renders it. It was
 extracted from [amux](https://github.com/nativelite/amux), the multi-agent
@@ -57,7 +57,7 @@ Snapshot the feed + subscriptions across a restart with [`bus::ENV_BUS`].
 ## Design rules
 
 - **Zero third-party runtime dependencies.** std + the org `json` crate only.
-- **One concern.** Coordination state and its rules — no I/O loop, no sockets, no
+- **One concern.** Coordination state and its rules: no I/O loop, no sockets, no
   rendering. The host owns those.
 - **Pure and testable.** Every method is a function over in-memory state plus a
   best-effort atomic snapshot write; the whole crate is unit-tested without a
@@ -73,5 +73,5 @@ python dev.py guard   # dependency guard only
 
 ## License
 
-MIT — see [LICENSE](LICENSE). nativelite ships its packages to give the
+MIT: see [LICENSE](LICENSE). nativelite ships its packages to give the
 technology away.
