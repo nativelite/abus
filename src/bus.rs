@@ -23,6 +23,11 @@
 //!   storm the team.
 //! * *Bounded ring*: at most [`RING_CAP`] events are retained; the oldest fall
 //!   off. The log can never grow without bound.
+//! * *Message size cap*: [`Bus::publish`] rejects an over-long payload (a single
+//!   field beyond [`MAX_FIELD_CHARS`] or a whole message beyond [`MAX_MSG_CHARS`]).
+//!   The bus line is a terse headline; long evidence belongs behind a
+//!   `detail=<pointer>` reference (a board key, path, or URL), not inline — so
+//!   the feed stays readable instead of becoming a wall of prose.
 //!
 //! Optionally mirrored to a snapshot file (set `ATRIUM_BUS=<path>`) so the feed and
 //! subscriptions survive a restart. Pure logic + a best-effort atomic write;
@@ -52,6 +57,14 @@ pub const RING_CAP: usize = 512;
 pub const RATE_MAX: usize = 20;
 /// The sliding window (ms) the rate cap counts publishes over.
 pub const RATE_WINDOW_MS: u64 = 10_000;
+
+/// Per-field value length cap (chars). A single field value longer than this is
+/// rejected: no one field (typically a prose `msg=`) may become a wall of text.
+/// Long evidence belongs behind a `detail=<pointer>` reference, not inline.
+pub const MAX_FIELD_CHARS: usize = 512;
+/// Whole-message size cap (chars): the sum of all field values. Keeps the bus
+/// line a terse headline; anything larger should be a pointer, not a payload.
+pub const MAX_MSG_CHARS: usize = 1024;
 
 /// The urgency class of an event: the visibility-vs-approval split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +156,12 @@ impl Bus {
         fields: &[(String, String)],
         now_ms: u64,
     ) -> Result<Event, String> {
+        // Size cap first (before the rate/ring bookkeeping): an over-long payload
+        // is a client bug the sender must fix, so it should consume neither a rate
+        // slot nor a seq — same "rejected publish costs nothing" rule as the rate
+        // cap. Applies to everyone, operator included: readability is not a
+        // function of who posted.
+        check_size(fields)?;
         if let Some(who) = from {
             if !self.rate_admit(who, now_ms) {
                 return Err(format!(
@@ -318,6 +337,33 @@ impl Bus {
             let _ = write_atomic(p, &snapshot(self));
         }
     }
+}
+
+/// Enforce the message size cap: reject a single field value beyond
+/// [`MAX_FIELD_CHARS`] or a whole payload beyond [`MAX_MSG_CHARS`]. The third
+/// backpressure dimension (with the rate and ring caps). Char-counted (not bytes)
+/// so multi-byte text isn't penalized. On rejection the error names the offending
+/// field and points at the `detail=<pointer>` convention, so the fix is obvious.
+fn check_size(fields: &[(String, String)]) -> Result<(), String> {
+    let mut total = 0usize;
+    for (k, v) in fields {
+        let n = v.chars().count();
+        if n > MAX_FIELD_CHARS {
+            return Err(format!(
+                "field {k:?} is {n} chars (cap {MAX_FIELD_CHARS}); keep the bus \
+                 line a terse headline and put the long evidence behind a pointer, \
+                 e.g. detail=board:<key> or detail=<path|url>"
+            ));
+        }
+        total += n;
+    }
+    if total > MAX_MSG_CHARS {
+        return Err(format!(
+            "message is {total} chars (cap {MAX_MSG_CHARS}); split the detail out \
+             behind a detail=<pointer> and keep the bus line terse"
+        ));
+    }
+    Ok(())
 }
 
 /// Render an event as a JSON value:
@@ -559,6 +605,71 @@ mod tests {
             1000 + RATE_WINDOW_MS + 1,
         );
         assert!(ok.is_ok(), "after the window the agent recovers");
+    }
+
+    #[test]
+    fn size_cap_rejects_an_over_long_field_and_points_at_detail() {
+        let mut b = Bus::new();
+        let huge = "x".repeat(MAX_FIELD_CHARS + 1);
+        let err = b
+            .publish("review", Kind::Fyi, Some("rev"), &f(&[("msg", &huge)]), 1)
+            .unwrap_err();
+        assert!(err.contains("msg"), "names the offending field: {err}");
+        assert!(
+            err.contains("detail="),
+            "points at the pointer convention: {err}"
+        );
+        // A rejected publish consumes neither a seq nor a ring slot.
+        assert!(b.tail(10).is_empty(), "over-long publish is not stored");
+    }
+
+    #[test]
+    fn size_cap_rejects_on_total_even_when_each_field_fits() {
+        let mut b = Bus::new();
+        // Each field is within MAX_FIELD_CHARS, but together they blow MAX_MSG_CHARS.
+        let big = "y".repeat(MAX_FIELD_CHARS);
+        let err = b
+            .publish(
+                "review",
+                Kind::Fyi,
+                Some("rev"),
+                &f(&[("a", &big), ("b", &big), ("c", &big)]),
+                1,
+            )
+            .unwrap_err();
+        assert!(err.contains("cap"), "reports the whole-message cap: {err}");
+        assert!(b.tail(10).is_empty(), "over-long publish is not stored");
+    }
+
+    #[test]
+    fn a_terse_headline_with_a_detail_pointer_publishes() {
+        let mut b = Bus::new();
+        let e = b
+            .publish(
+                "review",
+                Kind::Fyi,
+                Some("rev"),
+                &f(&[
+                    ("msg", "gate failed: 3 issues"),
+                    ("detail", "board:review-findings"),
+                ]),
+                1,
+            )
+            .unwrap();
+        assert_eq!(e.seq, 1, "a within-cap message publishes normally");
+    }
+
+    #[test]
+    fn size_cap_applies_to_the_operator_too() {
+        let mut b = Bus::new();
+        // The operator is uncapped on RATE, but readability is not a function of
+        // who posted — the size cap still applies.
+        let huge = "z".repeat(MAX_FIELD_CHARS + 1);
+        let err = b
+            .publish("t", Kind::Fyi, None, &f(&[("msg", &huge)]), 1)
+            .unwrap_err();
+        assert!(err.contains("cap"), "{err}");
+        assert!(b.tail(10).is_empty());
     }
 
     #[test]
