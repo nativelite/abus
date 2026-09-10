@@ -124,6 +124,14 @@ pub struct Bus {
     /// subscriber → recent publish timestamps, for the rolling rate cap.
     rate: BTreeMap<String, VecDeque<u64>>,
     path: Option<PathBuf>,
+    /// When `Some`, the fleet **declared** a canonical topic vocabulary (fleet
+    /// config `"topics": [...]`): publish/subscribe to a topic outside this set is
+    /// rejected — strict mode, agents route only where declared. When `None`,
+    /// topics are **soft-gated**: a never-before-seen topic must be created
+    /// deliberately with `--new`, and a typo is met with a near-match suggestion.
+    /// Two distinct paths, no bleed: `--new` never overrides a declared set.
+    /// Entries are [`normalize_topic`]d.
+    canonical: Option<BTreeSet<String>>,
 }
 
 impl Bus {
@@ -142,6 +150,92 @@ impl Bus {
             .unwrap_or_default();
         bus.path = Some(path);
         bus
+    }
+
+    /// Declare a canonical topic vocabulary (fleet config `"topics": [...]`),
+    /// switching the bus to **strict** admission: publish/subscribe outside this
+    /// set is rejected. Names are [`normalize_topic`]d and `*` (the firehose) is
+    /// never a declarable topic. An empty list is treated as **no declaration**
+    /// (stays soft-gated) rather than "nothing is allowed" — a fleet that means
+    /// to lock down declares real topics.
+    pub fn set_canonical(&mut self, topics: &[String]) {
+        let set: BTreeSet<String> = topics
+            .iter()
+            .map(|t| normalize_topic(t))
+            .filter(|t| !t.is_empty() && t != TOPIC_ALL)
+            .collect();
+        self.canonical = if set.is_empty() { None } else { Some(set) };
+    }
+
+    /// Whether this bus enforces a declared (strict) topic vocabulary.
+    pub fn is_strict(&self) -> bool {
+        self.canonical.is_some()
+    }
+
+    /// Gate a publish/subscribe to `topic` under the topic policy (finding #1,
+    /// fragmentation half). `create` is the caller's `--new` intent. Pure over the
+    /// bus's current topics + declared set, so it unit-tests without a terminal:
+    /// * **Strict** (a vocabulary was [`set_canonical`](Bus::set_canonical)d):
+    ///   only a declared topic is admitted; `create` is ignored (no `--new`
+    ///   escape). The error lists the allowed set.
+    /// * **Soft-gated** (no declaration): an existing topic is admitted; a novel
+    ///   one needs `create`, else the error offers near-matches so a typo like
+    ///   `review-gate` is steered back to `review` instead of forking the feed.
+    /// `*` (the firehose) is always admitted. Subscribers pass `create = true` so a
+    /// soft-gate never blocks *listening* for a topic that doesn't exist yet — only
+    /// publishing into the void needs the deliberate `--new`.
+    pub fn admit_topic(&self, topic: &str, create: bool) -> Result<(), String> {
+        let t = normalize_topic(topic);
+        if t == TOPIC_ALL {
+            return Ok(());
+        }
+        match &self.canonical {
+            Some(allowed) => {
+                if allowed.contains(&t) {
+                    Ok(())
+                } else {
+                    let list = allowed.iter().cloned().collect::<Vec<_>>().join(", ");
+                    Err(format!(
+                        "topic {t:?} is not one of this fleet's declared topics \
+                         [{list}] — coordinate on a declared topic (a declared \
+                         vocabulary has no --new escape)"
+                    ))
+                }
+            }
+            None => {
+                if create || self.existing_topics().contains(&t) {
+                    Ok(())
+                } else {
+                    let hint = match near_matches(&t, &self.existing_topics()) {
+                        m if !m.is_empty() => format!(" — did you mean: {}?", m.join(", ")),
+                        _ => String::new(),
+                    };
+                    Err(format!(
+                        "topic {t:?} is new and has no subscribers{hint} \
+                         (use --new to create it deliberately)"
+                    ))
+                }
+            }
+        }
+    }
+
+    /// The set of topics the bus currently knows: every topic anyone subscribes to
+    /// (minus `*`) unioned with every topic a retained event was published to. The
+    /// same universe [`topics_with_counts`](Bus::topics_with_counts) reports, as a
+    /// set for admission checks.
+    fn existing_topics(&self) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for set in self.subs.values() {
+            for t in set {
+                if t != TOPIC_ALL {
+                    names.insert(t.clone());
+                }
+            }
+        }
+        for e in &self.events {
+            names.insert(e.topic.clone());
+        }
+        names
     }
 
     /// Publish a structured event to `topic`. Enforces the per-agent rate cap
@@ -177,7 +271,7 @@ impl Bus {
         let seq = self.next_seq;
         let event = Event {
             seq,
-            topic: topic.to_string(),
+            topic: normalize_topic(topic),
             kind,
             from: from.map(str::to_string),
             ts_ms: now_ms,
@@ -214,7 +308,7 @@ impl Bus {
     pub fn subscribe(&mut self, who: &str, topics: &[String]) {
         let set = self.subs.entry(who.to_string()).or_default();
         for t in topics {
-            set.insert(t.clone());
+            set.insert(normalize_topic(t));
         }
         self.persist();
     }
@@ -226,7 +320,7 @@ impl Bus {
             self.subs.remove(who);
         } else if let Some(set) = self.subs.get_mut(who) {
             for t in topics {
-                set.remove(t);
+                set.remove(&normalize_topic(t));
             }
             if set.is_empty() {
                 self.subs.remove(who);
@@ -337,6 +431,54 @@ impl Bus {
             let _ = write_atomic(p, &snapshot(self));
         }
     }
+}
+
+/// Canonicalize a topic name so trivial variants don't fork the feed: trim
+/// surrounding whitespace and lowercase. `Review`, `review `, and `review` all
+/// collapse to one topic. `*` (the firehose) is returned unchanged. Applied at
+/// every storage boundary (publish/subscribe) and in [`Bus::admit_topic`], so a
+/// stored topic and an admission check always compare like-for-like.
+pub fn normalize_topic(t: &str) -> String {
+    let t = t.trim();
+    if t == TOPIC_ALL {
+        return t.to_string();
+    }
+    t.to_lowercase()
+}
+
+/// Up to three existing topics "close" to `t`, best-first, for a soft-gate typo
+/// nudge. A candidate qualifies when one name is a prefix of the other (the
+/// `review` / `review-gate` divergence) or the edit distance is ≤ 2 (a plain
+/// typo). Ranked by edit distance, then name for determinism.
+fn near_matches(t: &str, existing: &BTreeSet<String>) -> Vec<String> {
+    let mut scored: Vec<(usize, &String)> = existing
+        .iter()
+        .filter(|e| e.as_str() != t)
+        .filter_map(|e| {
+            let d = levenshtein(t, e);
+            let prefix = e.starts_with(t) || t.starts_with(e.as_str());
+            (prefix || d <= 2).then_some((d, e))
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+    scored.into_iter().take(3).map(|(_, e)| e.clone()).collect()
+}
+
+/// Classic two-row Levenshtein edit distance (char-based). Small inputs (topic
+/// names), so the allocation is negligible; kept dependency-free per org policy.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        cur[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 /// Enforce the message size cap: reject a single field value beyond
@@ -806,5 +948,78 @@ mod tests {
     fn topics_with_counts_is_empty_on_a_fresh_bus() {
         let b = Bus::new();
         assert!(b.topics_with_counts().is_empty());
+    }
+
+    #[test]
+    fn normalize_topic_collapses_case_and_whitespace_but_keeps_star() {
+        assert_eq!(normalize_topic("  Review "), "review");
+        assert_eq!(normalize_topic("DEPLOY"), "deploy");
+        assert_eq!(normalize_topic("*"), "*");
+    }
+
+    #[test]
+    fn publish_and_subscribe_normalize_so_a_case_variant_still_delivers() {
+        let mut b = Bus::new();
+        b.subscribe("lead", &["Review".to_string()]);
+        b.publish("REVIEW", Kind::Fyi, Some("rev"), &f(&[("m", "x")]), 1)
+            .unwrap();
+        // Subscriber followed "Review", publisher fired "REVIEW" — both normalize
+        // to "review", so the feed still connects them.
+        assert_eq!(b.feed("lead", 0).len(), 1, "case variants unify");
+    }
+
+    #[test]
+    fn soft_gate_rejects_a_novel_topic_without_new_and_suggests_a_near_match() {
+        let mut b = Bus::new();
+        // Establish "review" as an existing topic.
+        b.publish("review", Kind::Fyi, Some("a"), &f(&[("m", "x")]), 1)
+            .unwrap();
+        // A divergent typo without --new is rejected, and steered back to "review".
+        let err = b.admit_topic("review-gate", false).unwrap_err();
+        assert!(err.contains("--new"), "offers the deliberate escape: {err}");
+        assert!(err.contains("review"), "suggests the near-match: {err}");
+        // With --new the deliberate creation is admitted.
+        assert!(b.admit_topic("review-gate", true).is_ok());
+        // An already-existing topic needs no --new.
+        assert!(b.admit_topic("review", false).is_ok());
+    }
+
+    #[test]
+    fn soft_gate_always_admits_the_firehose() {
+        let b = Bus::new();
+        assert!(
+            b.admit_topic("*", false).is_ok(),
+            "* is always subscribable"
+        );
+    }
+
+    #[test]
+    fn strict_mode_admits_only_declared_topics_and_ignores_new() {
+        let mut b = Bus::new();
+        b.set_canonical(&["build".to_string(), "review".to_string()]);
+        assert!(b.is_strict());
+        assert!(
+            b.admit_topic("Build", false).is_ok(),
+            "declared, case-folded"
+        );
+        // Off-list is rejected even WITH --new (no escape from a declared set).
+        let err = b.admit_topic("adhoc", true).unwrap_err();
+        assert!(err.contains("declared"), "explains strict mode: {err}");
+        assert!(
+            err.contains("build") && err.contains("review"),
+            "lists set: {err}"
+        );
+    }
+
+    #[test]
+    fn set_canonical_empty_stays_soft_gated() {
+        let mut b = Bus::new();
+        b.set_canonical(&[]);
+        assert!(
+            !b.is_strict(),
+            "an empty declaration does not lock the fleet out"
+        );
+        // Soft-gate semantics still hold: --new creates.
+        assert!(b.admit_topic("anything", true).is_ok());
     }
 }
