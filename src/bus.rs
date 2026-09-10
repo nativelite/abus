@@ -270,6 +270,49 @@ impl Bus {
         self.events.iter().skip(start).collect()
     }
 
+    /// How many subscribers would **receive** an event published to `topic`:
+    /// those subscribed to `topic` explicitly or to [`TOPIC_ALL`] (`*`, the
+    /// firehose). Pass `exclude = Some(who)` to drop one subscriber from the
+    /// count — the publisher — so the result matches [`feed`](Bus::feed)'s no-echo
+    /// rule and answers the real question "will anyone *else* see this?". That is
+    /// the number the `bus pub` path uses to warn when it is zero: a publish that
+    /// reaches nobody is the silent-drop footgun this makes loud.
+    pub fn subscriber_count(&self, topic: &str, exclude: Option<&str>) -> usize {
+        self.subs
+            .iter()
+            .filter(|(who, _)| exclude != Some(who.as_str()))
+            .filter(|(_, set)| set.contains(topic) || set.contains(TOPIC_ALL))
+            .count()
+    }
+
+    /// The active topics with how many subscribers each has, topic-sorted, for
+    /// `bus topics` discoverability. A topic is "active" if anyone subscribes to it
+    /// **or** any retained event was published to it — so a topic that has been
+    /// published to but that nobody follows still shows up (with `0`), which is
+    /// exactly the case an operator needs to see. The count includes `*`
+    /// subscribers (they receive every topic); `*` itself is never listed as a
+    /// topic. Deterministic: sourced from `BTreeMap`/`BTreeSet` and the event ring.
+    pub fn topics_with_counts(&self) -> Vec<(String, usize)> {
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for set in self.subs.values() {
+            for t in set {
+                if t != TOPIC_ALL {
+                    names.insert(t.clone());
+                }
+            }
+        }
+        for e in &self.events {
+            names.insert(e.topic.clone());
+        }
+        names
+            .into_iter()
+            .map(|t| {
+                let c = self.subscriber_count(&t, None);
+                (t, c)
+            })
+            .collect()
+    }
+
     fn persist(&self) {
         if let Some(p) = &self.path {
             let _ = write_atomic(p, &snapshot(self));
@@ -606,5 +649,51 @@ mod tests {
         // Subscriptions survive, so the feed still resolves.
         let lead = restored.feed("lead", 0);
         assert_eq!(lead.len(), 2);
+    }
+
+    #[test]
+    fn subscriber_count_counts_topic_and_star_subscribers() {
+        let mut b = Bus::new();
+        b.subscribe("lead", &[TOPIC_ALL.to_string()]);
+        b.subscribe("dev_1", &["deploy".to_string()]);
+        b.subscribe("dev_2", &["billing".to_string()]);
+        // deploy: dev_1 (explicit) + lead (*) = 2; billing: dev_2 + lead = 2.
+        assert_eq!(b.subscriber_count("deploy", None), 2);
+        assert_eq!(b.subscriber_count("billing", None), 2);
+        // a topic nobody follows explicitly still has the firehose listener.
+        assert_eq!(b.subscriber_count("ghost", None), 1);
+    }
+
+    #[test]
+    fn subscriber_count_excludes_the_publisher_for_no_echo_parity() {
+        let mut b = Bus::new();
+        b.subscribe("dev_1", &["deploy".to_string()]);
+        // Only the publisher subscribes → nobody else receives it → 0.
+        assert_eq!(b.subscriber_count("deploy", Some("dev_1")), 0);
+        // A second subscriber makes it deliverable to one other.
+        b.subscribe("dev_2", &["deploy".to_string()]);
+        assert_eq!(b.subscriber_count("deploy", Some("dev_1")), 1);
+    }
+
+    #[test]
+    fn topics_with_counts_unions_subscribed_and_published_topics() {
+        let mut b = Bus::new();
+        b.subscribe("lead", &[TOPIC_ALL.to_string()]);
+        b.subscribe("dev_1", &["deploy".to_string()]);
+        // published-but-unsubscribed topic must still surface (with the * count).
+        b.publish("ghost", Kind::Fyi, Some("dev_2"), &f(&[]), 1)
+            .unwrap();
+        let topics = b.topics_with_counts();
+        // '*' is not itself a topic; deploy + ghost are, both include the firehose.
+        assert_eq!(
+            topics,
+            vec![("deploy".to_string(), 2), ("ghost".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn topics_with_counts_is_empty_on_a_fresh_bus() {
+        let b = Bus::new();
+        assert!(b.topics_with_counts().is_empty());
     }
 }
