@@ -132,6 +132,12 @@ pub struct Bus {
     /// Two distinct paths, no bleed: `--new` never overrides a declared set.
     /// Entries are [`normalize_topic`]d.
     canonical: Option<BTreeSet<String>>,
+    /// Deferred persistence ([`Bus::with_file_deferred`]): a mutation marks the
+    /// bus dirty instead of rewriting the whole file, and the host takes the write
+    /// with [`Bus::take_pending_write`] on its own schedule.
+    deferred: bool,
+    /// A deferred bus has changes not yet handed out for writing.
+    dirty: bool,
 }
 
 impl Bus {
@@ -150,6 +156,33 @@ impl Bus {
             .unwrap_or_default();
         bus.path = Some(path);
         bus
+    }
+
+    /// A bus backed by a snapshot file whose writes are **deferred**: loads like
+    /// [`Bus::with_file`], but a publish, subscribe, unsubscribe or resolve only
+    /// marks the bus dirty. The host collects the serialized state with
+    /// [`Bus::take_pending_write`] and writes it when it chooses.
+    ///
+    /// For a host with a latency-sensitive loop. [`Bus::with_file`] rewrites the
+    /// whole state on every mutation — a full 512-event ring is ~0.5 MB, several
+    /// milliseconds per write, on whatever thread mutated the bus.
+    pub fn with_file_deferred(path: PathBuf) -> Self {
+        let mut bus = Self::with_file(path);
+        bus.deferred = true;
+        bus
+    }
+
+    /// For a deferred bus with unwritten changes: its file path and the serialized
+    /// state to write there, clearing the dirty mark. `None` when nothing changed
+    /// since the last call, or the bus is not deferred and file-backed. The caller
+    /// owns the write; if it fails, the next mutation marks the bus dirty again.
+    pub fn take_pending_write(&mut self) -> Option<(PathBuf, String)> {
+        if !(self.deferred && self.dirty) {
+            return None;
+        }
+        let path = self.path.clone()?;
+        self.dirty = false;
+        Some((path, snapshot(self)))
     }
 
     /// Declare a canonical topic vocabulary (fleet config `"topics": [...]`),
@@ -366,14 +399,12 @@ impl Bus {
     /// Mark a `DecisionNeeded` event resolved (answered); `true` if it existed and
     /// was open. Persists if backed by a file.
     pub fn resolve(&mut self, seq: u64) -> bool {
-        for e in &mut self.events {
-            if e.seq == seq && !e.resolved {
-                e.resolved = true;
-                self.persist();
-                return true;
-            }
-        }
-        false
+        let Some(e) = self.events.iter_mut().find(|e| e.seq == seq && !e.resolved) else {
+            return false;
+        };
+        e.resolved = true;
+        self.persist();
+        true
     }
 
     /// The most recent `n` events (any topic), oldest-first: the unfiltered tail
@@ -426,7 +457,14 @@ impl Bus {
             .collect()
     }
 
-    fn persist(&self) {
+    fn persist(&mut self) {
+        if self.path.is_none() {
+            return;
+        }
+        if self.deferred {
+            self.dirty = true;
+            return;
+        }
         if let Some(p) = &self.path {
             let _ = write_atomic(p, &snapshot(self));
         }
@@ -567,9 +605,22 @@ fn parse_snapshot(text: &str) -> Option<Bus> {
     let mut bus = Bus::default();
     if let Some(events) = v.get("events").and_then(Value::as_array) {
         for ev in events {
+            // The caps a live publish enforces hold for a loaded file too. A
+            // snapshot is a file, not a publish, and without this a hand-edited one
+            // could carry any number of events of any size past both caps.
             if let Some(e) = event_from_value(ev) {
-                bus.events.push_back(e);
+                let fields: Vec<(String, String)> = e
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if check_size(&fields).is_ok() {
+                    bus.events.push_back(e);
+                }
             }
+        }
+        while bus.events.len() > RING_CAP {
+            bus.events.pop_front();
         }
     }
     // next_seq is the last-used seq (1-based, pre-incremented on publish). Honor
@@ -638,6 +689,91 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("abus_{name}_{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// A deferred bus never writes on its own: a mutation only marks it dirty,
+    /// the host takes one write for any number of mutations, and taking it again
+    /// with nothing new yields nothing.
+    #[test]
+    fn a_deferred_bus_hands_its_writes_to_the_host() {
+        let path = scratch("deferred");
+        let mut bus = Bus::with_file_deferred(path.clone());
+        bus.subscribe("lead", &["piece".to_string()]);
+        bus.publish(
+            "piece",
+            Kind::Fyi,
+            Some("lead"),
+            &[("msg".into(), "a".into())],
+            1,
+        )
+        .unwrap();
+        assert!(!path.exists(), "a deferred bus must not write on mutation");
+        let (to, contents) = bus.take_pending_write().expect("mutations are pending");
+        assert_eq!(to, path);
+        assert!(
+            bus.take_pending_write().is_none(),
+            "one write covers them all"
+        );
+        std::fs::write(&path, contents).unwrap();
+        let back = Bus::with_file(path.clone());
+        assert!(back
+            .subscriptions("lead")
+            .is_some_and(|t| t.contains("piece")));
+        assert_eq!(back.tail(10).len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An immediate (non-deferred) bus keeps its old behaviour and never reports
+    /// a pending write.
+    #[test]
+    fn an_immediate_bus_still_writes_on_mutation() {
+        let path = scratch("immediate");
+        let mut bus = Bus::with_file(path.clone());
+        bus.subscribe("lead", &["piece".to_string()]);
+        assert!(path.exists());
+        assert!(bus.take_pending_write().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A loaded file is held to the same caps as a live publish: past the ring
+    /// only the newest events survive, and an oversized event is dropped.
+    #[test]
+    fn a_loaded_snapshot_is_held_to_the_ring_and_size_caps() {
+        let path = scratch("caps");
+        let mut events = Vec::new();
+        for seq in 1..=(RING_CAP as i64 + 10) {
+            events.push(format!(
+                r#"{{"seq":{seq},"topic":"t","kind":"fyi","from":"a","ts":1,"resolved":false,"fields":{{"msg":"x"}}}}"#
+            ));
+        }
+        let huge = "y".repeat(MAX_FIELD_CHARS + 1);
+        events.push(format!(
+            r#"{{"seq":9999,"topic":"t","kind":"fyi","from":"a","ts":1,"resolved":false,"fields":{{"msg":"{huge}"}}}}"#
+        ));
+        let text = format!(
+            r#"{{"next_seq":0,"events":[{}],"subs":{{}}}}"#,
+            events.join(",")
+        );
+        std::fs::write(&path, text).unwrap();
+        let bus = Bus::with_file(path.clone());
+        let tail = bus.tail(RING_CAP * 2);
+        assert_eq!(tail.len(), RING_CAP, "the ring cap holds on load");
+        assert!(
+            tail.iter().all(|e| e.seq != 9999),
+            "an oversized event is dropped"
+        );
+        assert_eq!(
+            tail.last().map(|e| e.seq),
+            Some(RING_CAP as u64 + 10),
+            "newest kept"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 
     fn f(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs

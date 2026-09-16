@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Deferred persistence: `Bus::with_file_deferred` / `Board::with_file_deferred`
+  and `take_pending_write`.** A file-backed bus or board rewrote its whole state
+  on every mutation, on the mutating thread — a full 512-event ring is ~0.5 MB and
+  several milliseconds per write. A deferred one only marks itself dirty; the host
+  takes one serialized write covering any number of mutations and writes it where
+  and when it chooses. `with_file` is unchanged.
+
+### Fixed
+- **A loaded bus snapshot is held to the ring and size caps.** The caps applied
+  only to a live publish, so a hand-edited snapshot could load any number of
+  events of any size. Past `RING_CAP` only the newest events are kept, and an
+  event over the field or message cap is dropped.
+
 ## [0.1.0] - 2026-09-01
 
 ### Added

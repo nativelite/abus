@@ -79,6 +79,9 @@ pub enum Claim {
 pub struct Board {
     entries: BTreeMap<String, Entry>,
     path: Option<PathBuf>,
+    /// Deferred persistence, as for the bus: see [`Board::with_file_deferred`].
+    deferred: bool,
+    dirty: bool,
 }
 
 impl Board {
@@ -98,7 +101,29 @@ impl Board {
         Board {
             entries,
             path: Some(path),
+            deferred: false,
+            dirty: false,
         }
+    }
+
+    /// A board backed by a snapshot file whose writes are **deferred**: a set,
+    /// claim, release or delete only marks it dirty, and the host collects the
+    /// serialized state with [`Board::take_pending_write`] on its own schedule.
+    pub fn with_file_deferred(path: PathBuf) -> Self {
+        let mut board = Self::with_file(path);
+        board.deferred = true;
+        board
+    }
+
+    /// For a deferred board with unwritten changes: its path and the serialized
+    /// state, clearing the dirty mark. `None` otherwise.
+    pub fn take_pending_write(&mut self) -> Option<(PathBuf, String)> {
+        if !(self.deferred && self.dirty) {
+            return None;
+        }
+        let path = self.path.clone()?;
+        self.dirty = false;
+        Some((path, snapshot(&self.entries)))
     }
 
     /// Merge `fields` into `key`'s entry (creating it if absent), stamping who and
@@ -198,7 +223,14 @@ impl Board {
         had
     }
 
-    fn persist(&self) {
+    fn persist(&mut self) {
+        if self.path.is_none() {
+            return;
+        }
+        if self.deferred {
+            self.dirty = true;
+            return;
+        }
         if let Some(p) = &self.path {
             let _ = write_atomic(p, &snapshot(&self.entries));
         }
