@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events of any size. Past `RING_CAP` only the newest events are kept, and an
   event over the field or message cap is dropped.
 
+## [0.2.0] - 2026-09-12
+
+### Added
+- **Bus discoverability:** `Bus::subscriber_count` (who would receive a topic,
+  optionally excluding the publisher) and `Bus::topics_with_counts` (every known
+  topic with its subscriber count). Additive.
+- **Message size caps**, the third backpressure dimension beside the publish
+  rate cap and the event ring: a field may hold `MAX_FIELD_CHARS` (512) and a
+  whole message `MAX_MSG_CHARS` (1024). An oversized publish is refused.
+- **A layered topic policy:** soft-gated by default, strict once a canonical
+  vocabulary is declared with `Bus::set_canonical`. `Bus::admit_topic` applies
+  the policy, so a team converges on one set of topics.
+
 ## [0.1.0] - 2026-09-01
 
 ### Added
@@ -39,3 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and a bounded event ring. Opt-in atomic snapshot persistence (`ENV_BUS`).
   - Pure logic over in-memory state; zero third-party dependencies (std + the org
     `json` crate). 16 unit tests carried over from atrium.
+
+[Unreleased]: https://github.com/nativelite/abus/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/nativelite/abus/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/nativelite/abus/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/nativelite/abus/releases/tag/v0.1.0
