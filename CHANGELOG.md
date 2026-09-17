@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-17
+
 ### Added
 - **Deferred persistence: `Bus::with_file_deferred` / `Board::with_file_deferred`
   and `take_pending_write`.** A file-backed bus or board rewrote its whole state
